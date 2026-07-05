@@ -65,6 +65,7 @@ class Database:
                 db_name,
             )
             if exists:
+                logger.info("Database %s already exists", db_name)
                 return
             await conn.execute(f'CREATE DATABASE "{db_name}"')
             logger.info("Created database %s", db_name)
@@ -84,6 +85,7 @@ class Database:
                 )
                 """
             )
+            logger.info("Database tables initialized")
 
     async def set_lastfm_username(
         self,

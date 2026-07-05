@@ -32,9 +32,16 @@ from lastfm_card import (
 
 logger = logging.getLogger(__name__)
 
+CACHE_TIME_SECONDS = 15
+
+
+class NotNowPlayingError(RuntimeError):
+    pass
+
 
 @client.on_message(filters.command("start"))
 async def start_handler(_, message: Message) -> None:
+    logger.info("Processing /start from user_id=%s", message.from_user.id)
     await message.reply_text(
         "Set your Last.fm username with:\n"
         "<code>/set your_lastfm_username</code>\n\n"
@@ -44,6 +51,7 @@ async def start_handler(_, message: Message) -> None:
 
 @client.on_message(filters.command("set"))
 async def set_handler(_, message: Message) -> None:
+    logger.info("Processing /set from user_id=%s", message.from_user.id)
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         await message.reply_text("Usage: <code>/set your_lastfm_username</code>")
@@ -51,13 +59,28 @@ async def set_handler(_, message: Message) -> None:
 
     username = parts[1].strip()
     await get_db().set_lastfm_username(message.from_user.id, username)
+    logger.info(
+        "Saved Last.fm username for user_id=%s username=%s",
+        message.from_user.id,
+        username,
+    )
     await message.reply_text(f"Saved Last.fm username: <code>{username}</code>")
 
 
 @client.on_inline_query()
 async def inline_handler(bot, inline_query: InlineQuery) -> None:
+    logger.info(
+        "Processing inline query id=%s user_id=%s query=%r",
+        inline_query.id,
+        inline_query.from_user.id,
+        inline_query.query,
+    )
     saved_user = await get_db().get_lastfm_user(inline_query.from_user.id)
     if saved_user is None:
+        logger.info(
+            "Inline query rejected because user_id=%s has no Last.fm username",
+            inline_query.from_user.id,
+        )
         await inline_query.answer(
             [
                 InlineQueryResultArticle(
@@ -69,7 +92,7 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
                     ),
                 )
             ],
-            cache_time=0,
+            cache_time=CACHE_TIME_SECONDS,
             is_personal=True,
         )
         return
@@ -81,6 +104,12 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
             lastfm_api_key=get_config().lastfm_api_key,
             display_name=inline_query.from_user.first_name or "Someone",
             avatar_path=await _download_avatar(bot, inline_query),
+        )
+        logger.info(
+            "Generated %s cards for user_id=%s lastfm_username=%s",
+            len(cards),
+            inline_query.from_user.id,
+            saved_user.lastfm_username,
         )
         cached_results = []
         for variant, image_bytes, spotify_query in cards:
@@ -98,12 +127,46 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
                     id=variant.lower(),
                     photo_file_id=photo_file_id,
                     title=f"{variant} card",
-                    description=spotify_query,
                     reply_markup=_spotify_button(spotify_query),
                 )
             )
+            logger.info(
+                "Uploaded %s card for inline query id=%s",
+                variant.lower(),
+                inline_query.id,
+            )
 
-        await inline_query.answer(cached_results, cache_time=0, is_personal=True)
+        await inline_query.answer(
+            cached_results,
+            cache_time=CACHE_TIME_SECONDS,
+            is_gallery=True,
+            is_personal=True,
+        )
+        logger.info(
+            "Answered inline query id=%s with %s image results",
+            inline_query.id,
+            len(cached_results),
+        )
+    except NotNowPlayingError:
+        logger.info(
+            "Inline query id=%s user_id=%s has no now-playing track",
+            inline_query.id,
+            inline_query.from_user.id,
+        )
+        await inline_query.answer(
+            [
+                InlineQueryResultArticle(
+                    id="not-now-playing",
+                    title="You are not listening to anything",
+                    description="Try after sometime if you just started playing.",
+                    input_message_content=InputTextMessageContent(
+                        "You are not listening to anything? Try after sometime if you just started playing"
+                    ),
+                )
+            ],
+            cache_time=CACHE_TIME_SECONDS,
+            is_personal=True,
+        )
     except Exception:
         logger.exception("Inline Last.fm card generation failed")
         await inline_query.answer(
@@ -117,7 +180,7 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
                     ),
                 )
             ],
-            cache_time=0,
+            cache_time=CACHE_TIME_SECONDS,
             is_personal=True,
         )
 
@@ -149,6 +212,8 @@ def _build_card_payloads(
 ) -> list[tuple[str, bytes, str]]:
     try:
         now = get_now_playing(lastfm_username, lastfm_api_key)
+        if not now["now_playing"]:
+            raise NotNowPlayingError
         song_art_url = get_artwork_url(
             now["artist"],
             now["track"],
