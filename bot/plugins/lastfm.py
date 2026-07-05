@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import io
 import logging
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
 
+import pyrogram
 from pyrogram import filters
 from pyrogram.types import (
     InlineKeyboardButton,
@@ -69,6 +72,7 @@ async def set_handler(_, message: Message) -> None:
 
 @client.on_inline_query()
 async def inline_handler(bot, inline_query: InlineQuery) -> None:
+    started = time.monotonic()
     logger.info(
         "Processing inline query id=%s user_id=%s query=%r",
         inline_query.id,
@@ -81,7 +85,8 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
             "Inline query rejected because user_id=%s has no Last.fm username",
             inline_query.from_user.id,
         )
-        await inline_query.answer(
+        await _safe_answer(
+            inline_query,
             [
                 InlineQueryResultArticle(
                     id="setup-required",
@@ -111,41 +116,38 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
             inline_query.from_user.id,
             saved_user.lastfm_username,
         )
-        cached_results = []
-        for variant, image_bytes, spotify_query in cards:
-            photo = io.BytesIO(image_bytes)
-            photo.name = f"lastfm-{variant.lower()}.png"
-            photo.seek(0)
-            sent = await bot.send_photo(
-                chat_id=get_config().storage_chat_id,
-                photo=photo,
-                caption=f"{variant}: {spotify_query}",
-            )
-            photo_file_id = sent.photo.file_id
-            cached_results.append(
-                InlineQueryResultCachedPhoto(
-                    id=variant.lower(),
-                    photo_file_id=photo_file_id,
-                    title=f"{variant} card",
-                    reply_markup=_spotify_button(spotify_query),
+        cached_results = await asyncio.gather(
+            *(
+                _upload_card_result(
+                    bot,
+                    inline_query.id,
+                    variant,
+                    image_bytes,
+                    spotify_query,
                 )
+                for variant, image_bytes, spotify_query in cards
             )
-            logger.info(
-                "Uploaded %s card for inline query id=%s",
-                variant.lower(),
-                inline_query.id,
-            )
+        )
 
-        await inline_query.answer(
+        answered = await _safe_answer(
+            inline_query,
             cached_results,
             cache_time=CACHE_TIME_SECONDS,
             is_gallery=True,
             is_personal=True,
         )
-        logger.info(
-            "Answered inline query id=%s with %s image results",
+        if answered:
+            logger.info(
+                "Answered inline query id=%s with %s image results in %.2fs",
+                inline_query.id,
+                len(cached_results),
+                time.monotonic() - started,
+            )
+    except pyrogram.errors.QueryIdInvalid:
+        logger.warning(
+            "Inline query id=%s expired before answer after %.2fs",
             inline_query.id,
-            len(cached_results),
+            time.monotonic() - started,
         )
     except NotNowPlayingError:
         logger.info(
@@ -153,7 +155,8 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
             inline_query.id,
             inline_query.from_user.id,
         )
-        await inline_query.answer(
+        await _safe_answer(
+            inline_query,
             [
                 InlineQueryResultArticle(
                     id="not-now-playing",
@@ -169,7 +172,8 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
         )
     except Exception:
         logger.exception("Inline Last.fm card generation failed")
-        await inline_query.answer(
+        await _safe_answer(
+            inline_query,
             [
                 InlineQueryResultArticle(
                     id="generation-failed",
@@ -185,15 +189,52 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
         )
 
 
+async def _safe_answer(
+    inline_query: InlineQuery,
+    results: list,
+    **kwargs,
+) -> bool:
+    try:
+        await inline_query.answer(results, **kwargs)
+        return True
+    except pyrogram.errors.QueryIdInvalid:
+        logger.warning("Inline query id=%s expired before answer", inline_query.id)
+        return False
+
+
+async def _upload_card_result(
+    bot,
+    inline_query_id: str,
+    variant: str,
+    image_bytes: bytes,
+    spotify_query: str,
+) -> InlineQueryResultCachedPhoto:
+    photo = io.BytesIO(image_bytes)
+    photo.name = f"lastfm-{variant.lower()}.png"
+    photo.seek(0)
+    sent = await bot.send_photo(
+        chat_id=get_config().storage_chat_id,
+        photo=photo,
+        caption=f"{variant}: {spotify_query}",
+    )
+    logger.info(
+        "Uploaded %s card for inline query id=%s",
+        variant.lower(),
+        inline_query_id,
+    )
+    return InlineQueryResultCachedPhoto(
+        id=variant.lower(),
+        photo_file_id=sent.photo.file_id,
+        title=f"{variant} card",
+        reply_markup=_spotify_button(spotify_query),
+    )
+
+
 async def _download_avatar(bot, inline_query: InlineQuery) -> str | None:
     user = inline_query.from_user
     file_id = None
     if getattr(user, "photo", None) is not None:
         file_id = user.photo.big_file_id or user.photo.small_file_id
-    if file_id is None:
-        photos = [photo async for photo in bot.get_chat_photos(user.id, limit=1)]
-        if photos:
-            file_id = photos[0].file_id
     if file_id is None:
         return None
 
@@ -214,18 +255,6 @@ def _build_card_payloads(
         now = get_now_playing(lastfm_username, lastfm_api_key)
         if not now["now_playing"]:
             raise NotNowPlayingError
-        song_art_url = get_artwork_url(
-            now["artist"],
-            now["track"],
-            "song",
-            now["lastfm_image_url"],
-        )
-        podcast_art_url = get_artwork_url(
-            now["artist"],
-            now["track"],
-            "podcastEpisode",
-            now["lastfm_image_url"],
-        )
         spotify_query = f"{now['artist']} - {now['track']}"
         common = {
             "display_name": display_name,
@@ -234,35 +263,46 @@ def _build_card_payloads(
             "album": now["album"],
             "avatar_path": avatar_path,
         }
-        return [
-            (
-                "Normal",
-                _render_png_bytes(
-                    render_card(
-                        **common,
-                        artwork_img=download_image(song_art_url)
-                        if song_art_url
-                        else None,
-                    )
-                ),
-                spotify_query,
-            ),
-            (
-                "Podcast",
-                _render_png_bytes(
-                    render_card(
-                        **common,
-                        artwork_img=download_image(podcast_art_url)
-                        if podcast_art_url
-                        else None,
-                    )
-                ),
-                spotify_query,
-            ),
-        ]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    _render_variant,
+                    variant,
+                    entity,
+                    now,
+                    common,
+                    spotify_query,
+                )
+                for variant, entity in (
+                    ("Normal", "song"),
+                    ("Podcast", "podcastEpisode"),
+                )
+            ]
+            return [future.result() for future in futures]
     finally:
         if avatar_path is not None:
             Path(avatar_path).unlink(missing_ok=True)
+
+
+def _render_variant(
+    variant: str,
+    entity: str,
+    now: dict,
+    common: dict,
+    spotify_query: str,
+) -> tuple[str, bytes, str]:
+    art_url = get_artwork_url(
+        now["artist"],
+        now["track"],
+        entity,
+        now["lastfm_image_url"],
+    )
+    artwork_img = download_image(art_url) if art_url else None
+    return (
+        variant,
+        _render_png_bytes(render_card(**common, artwork_img=artwork_img)),
+        spotify_query,
+    )
 
 
 def _render_png_bytes(image) -> bytes:
