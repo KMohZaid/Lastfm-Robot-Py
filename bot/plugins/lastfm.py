@@ -1,0 +1,220 @@
+"""Last.fm command and inline handlers."""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import logging
+import tempfile
+import urllib.parse
+from pathlib import Path
+
+from pyrogram import filters
+from pyrogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedPhoto,
+    InputTextMessageContent,
+    Message,
+)
+
+from bot.client import client
+from bot.config import get_config
+from bot.database import get_db
+from lastfm_card import (
+    download_image,
+    get_artwork_url,
+    get_now_playing,
+    render_card,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@client.on_message(filters.command("start"))
+async def start_handler(_, message: Message) -> None:
+    await message.reply_text(
+        "Set your Last.fm username with:\n"
+        "<code>/set your_lastfm_username</code>\n\n"
+        "Then use this bot inline to share your current or recent track."
+    )
+
+
+@client.on_message(filters.command("set"))
+async def set_handler(_, message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.reply_text("Usage: <code>/set your_lastfm_username</code>")
+        return
+
+    username = parts[1].strip()
+    await get_db().set_lastfm_username(message.from_user.id, username)
+    await message.reply_text(f"Saved Last.fm username: <code>{username}</code>")
+
+
+@client.on_inline_query()
+async def inline_handler(bot, inline_query: InlineQuery) -> None:
+    saved_user = await get_db().get_lastfm_user(inline_query.from_user.id)
+    if saved_user is None:
+        await inline_query.answer(
+            [
+                InlineQueryResultArticle(
+                    id="setup-required",
+                    title="Set your Last.fm username first",
+                    description="Send /set your_lastfm_username to the bot.",
+                    input_message_content=InputTextMessageContent(
+                        "Set your Last.fm username in the bot DM first."
+                    ),
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
+        return
+
+    try:
+        cards = await asyncio.to_thread(
+            _build_card_payloads,
+            lastfm_username=saved_user.lastfm_username,
+            lastfm_api_key=get_config().lastfm_api_key,
+            display_name=inline_query.from_user.first_name or "Someone",
+            avatar_path=await _download_avatar(bot, inline_query),
+        )
+        cached_results = []
+        for variant, image_bytes, spotify_query in cards:
+            photo = io.BytesIO(image_bytes)
+            photo.name = f"lastfm-{variant.lower()}.png"
+            photo.seek(0)
+            sent = await bot.send_photo(
+                chat_id=get_config().storage_chat_id,
+                photo=photo,
+                caption=f"{variant}: {spotify_query}",
+            )
+            photo_file_id = sent.photo.file_id
+            cached_results.append(
+                InlineQueryResultCachedPhoto(
+                    id=variant.lower(),
+                    photo_file_id=photo_file_id,
+                    title=f"{variant} card",
+                    description=spotify_query,
+                    reply_markup=_spotify_button(spotify_query),
+                )
+            )
+
+        await inline_query.answer(cached_results, cache_time=0, is_personal=True)
+    except Exception:
+        logger.exception("Inline Last.fm card generation failed")
+        await inline_query.answer(
+            [
+                InlineQueryResultArticle(
+                    id="generation-failed",
+                    title="Could not generate card",
+                    description="Check your Last.fm username or try again later.",
+                    input_message_content=InputTextMessageContent(
+                        "Could not generate a Last.fm card right now."
+                    ),
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
+
+
+async def _download_avatar(bot, inline_query: InlineQuery) -> str | None:
+    user = inline_query.from_user
+    file_id = None
+    if getattr(user, "photo", None) is not None:
+        file_id = user.photo.big_file_id or user.photo.small_file_id
+    if file_id is None:
+        photos = [photo async for photo in bot.get_chat_photos(user.id, limit=1)]
+        if photos:
+            file_id = photos[0].file_id
+    if file_id is None:
+        return None
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+    tmp.close()
+    await bot.download_media(file_id, file_name=tmp.name)
+    return tmp.name
+
+
+def _build_card_payloads(
+    *,
+    lastfm_username: str,
+    lastfm_api_key: str,
+    display_name: str,
+    avatar_path: str | None,
+) -> list[tuple[str, bytes, str]]:
+    try:
+        now = get_now_playing(lastfm_username, lastfm_api_key)
+        song_art_url = get_artwork_url(
+            now["artist"],
+            now["track"],
+            "song",
+            now["lastfm_image_url"],
+        )
+        podcast_art_url = get_artwork_url(
+            now["artist"],
+            now["track"],
+            "podcastEpisode",
+            now["lastfm_image_url"],
+        )
+        spotify_query = f"{now['artist']} - {now['track']}"
+        common = {
+            "display_name": display_name,
+            "track": now["track"],
+            "artist": now["artist"],
+            "album": now["album"],
+            "avatar_path": avatar_path,
+        }
+        return [
+            (
+                "Normal",
+                _render_png_bytes(
+                    render_card(
+                        **common,
+                        artwork_img=download_image(song_art_url)
+                        if song_art_url
+                        else None,
+                    )
+                ),
+                spotify_query,
+            ),
+            (
+                "Podcast",
+                _render_png_bytes(
+                    render_card(
+                        **common,
+                        artwork_img=download_image(podcast_art_url)
+                        if podcast_art_url
+                        else None,
+                    )
+                ),
+                spotify_query,
+            ),
+        ]
+    finally:
+        if avatar_path is not None:
+            Path(avatar_path).unlink(missing_ok=True)
+
+
+def _render_png_bytes(image) -> bytes:
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _spotify_button(query: str) -> InlineKeyboardMarkup:
+    encoded_query = urllib.parse.quote(query)
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Search on Spotify",
+                    url=f"https://open.spotify.com/search/{encoded_query}",
+                )
+            ]
+        ]
+    )

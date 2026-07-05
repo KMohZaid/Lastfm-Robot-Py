@@ -1,0 +1,10 @@
+.git
+.agents
+.codex
+__pycache__
+*.pyc
+.env
+avatar.png
+card.png
+demo.png
+podcast-card.png

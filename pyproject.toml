@@ -1,0 +1,17 @@
+[project]
+name = "lastfm-robot-py"
+version = "0.1.0"
+description = "Telegram inline Last.fm card bot"
+requires-python = ">=3.11"
+dependencies = [
+    "asyncpg>=0.31.0",
+    "kurigram>=2.2.23",
+    "pillow>=10.0.0",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.0",
+    "tgcrypto>=1.2.5",
+    "uvloop>=0.21.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
