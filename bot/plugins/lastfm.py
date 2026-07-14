@@ -12,6 +12,7 @@ import urllib.parse
 from pathlib import Path
 
 import pyrogram
+from PIL import Image
 from pyrogram import filters
 from pyrogram.types import (
     InlineKeyboardButton,
@@ -19,6 +20,7 @@ from pyrogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedPhoto,
+    InlineQueryResultCachedSticker,
     InputTextMessageContent,
     Message,
 )
@@ -116,9 +118,9 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
             inline_query.from_user.id,
             saved_user.lastfm_username,
         )
-        cached_results = await asyncio.gather(
+        photo_results = await asyncio.gather(
             *(
-                _upload_card_result(
+                _upload_card_photo_result(
                     bot,
                     inline_query.id,
                     variant,
@@ -128,6 +130,18 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
                 for variant, image_bytes, spotify_query in cards
             )
         )
+        sticker_results = await asyncio.gather(
+            *(
+                _upload_card_sticker_result(
+                    bot,
+                    inline_query.id,
+                    variant,
+                    image_bytes,
+                )
+                for variant, image_bytes, _ in cards
+            )
+        )
+        cached_results = [*photo_results, *sticker_results]
 
         answered = await _safe_answer(
             inline_query,
@@ -138,7 +152,7 @@ async def inline_handler(bot, inline_query: InlineQuery) -> None:
         )
         if answered:
             logger.info(
-                "Answered inline query id=%s with %s image results in %.2fs",
+                "Answered inline query id=%s with %s results in %.2fs",
                 inline_query.id,
                 len(cached_results),
                 time.monotonic() - started,
@@ -202,7 +216,7 @@ async def _safe_answer(
         return False
 
 
-async def _upload_card_result(
+async def _upload_card_photo_result(
     bot,
     inline_query_id: str,
     variant: str,
@@ -227,6 +241,30 @@ async def _upload_card_result(
         photo_file_id=sent.photo.file_id,
         title=f"{variant} card",
         reply_markup=_spotify_button(spotify_query),
+    )
+
+
+async def _upload_card_sticker_result(
+    bot,
+    inline_query_id: str,
+    variant: str,
+    image_bytes: bytes,
+) -> InlineQueryResultCachedSticker:
+    sticker = io.BytesIO(_render_sticker_webp_bytes(image_bytes))
+    sticker.name = f"lastfm-{variant.lower()}.webp"
+    sticker.seek(0)
+    sent = await bot.send_sticker(
+        chat_id=get_config().storage_chat_id,
+        sticker=sticker,
+    )
+    logger.info(
+        "Uploaded %s sticker for inline query id=%s",
+        variant.lower(),
+        inline_query_id,
+    )
+    return InlineQueryResultCachedSticker(
+        id=f"{variant.lower()}-sticker",
+        sticker_file_id=sent.sticker.file_id,
     )
 
 
@@ -308,6 +346,14 @@ def _render_variant(
 def _render_png_bytes(image) -> bytes:
     out = io.BytesIO()
     image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _render_sticker_webp_bytes(image_bytes: bytes) -> bytes:
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    image.thumbnail((512, 512))
+    out = io.BytesIO()
+    image.save(out, format="WEBP", lossless=True)
     return out.getvalue()
 
 
