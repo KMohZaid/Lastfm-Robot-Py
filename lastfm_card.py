@@ -106,41 +106,126 @@ WHITE = (255, 255, 255)
 WHITE_DIM = (235, 245, 238)
 
 
-def get_now_playing(username: str, api_key: str) -> dict:
-    """Fetch the current/most recent scrobble from Last.fm."""
-    url = "https://ws.audioscrobbler.com/2.0/"
-    params = {
-        "method": "user.getrecenttracks",
-        "user": username,
-        "api_key": api_key,
-        "format": "json",
-        "limit": 1,
-    }
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    tracks = data.get("recenttracks", {}).get("track", [])
-    if not tracks:
-        raise RuntimeError("No recent tracks found for this Last.fm user.")
-    track = tracks[0] if isinstance(tracks, list) else tracks
-    is_now_playing = track.get("@attr", {}).get("nowplaying") == "true"
+EPISODE_RE = re.compile(r"\bep(?:isode)?[^\d]*(\d+)\b", re.IGNORECASE)
 
-    lastfm_image_url = None
-    for img in track.get("image", []):
-        if img.get("size") == "extralarge" and img.get("#text"):
-            lastfm_image_url = img["#text"]
+
+def _track_text(value) -> str:
+    if isinstance(value, dict):
+        return value.get("#text") or value.get("name") or ""
+    return str(value or "")
+
+
+def _first_track(value):
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value if isinstance(value, dict) else None
+
+
+def extract_episode_number(text: str) -> str | None:
+    match = EPISODE_RE.search(text or "")
+    return match.group(1) if match else None
+
+
+def _itunes_search_results(term: str, entity: str, limit: int = 10) -> list[dict]:
+    try:
+        resp = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": term, "entity": entity, "limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("results", [])
+    except (requests.RequestException, ValueError):
+        return []
+
+
+def search_artwork_candidates(
+    artist: str, track: str, album: str, lastfm_fallback: str | None
+) -> list[tuple[str, str | None]]:
+    """Return conservative music matches, or podcast matches when needed."""
+    number = extract_episode_number(" ".join((track, album)))
+    candidates: list[tuple[str, str | None]] = []
+    music_terms = [
+        f"{album} {artist}" if album else f"{artist} {track}",
+        f"{artist} {track}",
+        f"{track} {album} {artist}" if album else f"{track} {artist}",
+    ]
+    for term in music_terms:
+        for result in _itunes_search_results(term, "song"):
+            name = str(result.get("trackName", "")).casefold()
+            result_artist = str(result.get("artistName", "")).casefold()
+            if not name or track.casefold() not in name and name not in track.casefold():
+                continue
+            if artist and artist.casefold() not in result_artist and result_artist not in artist.casefold():
+                continue
+            candidate = ("Music", _result_artwork(result) or lastfm_fallback)
+            if candidate not in candidates:
+                candidates.append(candidate)
+        if candidates:
             break
 
+    episode_terms = []
+    if number:
+        episode_terms.extend(
+            (
+                f"{album} episode {number}" if album else f"{artist} episode {number}",
+                f"{album} episode {number} {track}" if album else f"{artist} episode {number} {track}",
+            )
+        )
+    episode_terms.append(f"{track} {album} {artist}" if album else f"{artist} {track}")
+    for term in episode_terms:
+        for result in _itunes_search_results(term, "podcastEpisode"):
+            name = str(result.get("trackName", ""))
+            collection = str(result.get("collectionName", ""))
+            haystack = f"{name} {collection}".casefold()
+            if number and number not in haystack:
+                continue
+            if track and track.casefold() not in haystack and not number:
+                continue
+            candidate = ("Podcast", _result_artwork(result) or lastfm_fallback)
+            if candidate not in candidates:
+                candidates.append(candidate)
+        if any(kind == "Podcast" for kind, _ in candidates):
+            break
+    return candidates
+
+
+def search_artwork(
+    artist: str, track: str, album: str, lastfm_fallback: str | None
+) -> tuple[str, str | None] | None:
+    """Choose the best music or podcast artwork match."""
+    candidates = search_artwork_candidates(artist, track, album, lastfm_fallback)
+    return candidates[0] if candidates else None
+
+
+def _result_artwork(result: dict) -> str | None:
+    art_url = result.get("artworkUrl600") or result.get("artworkUrl100") or result.get("artworkUrl60") or result.get("artworkUrl30")
+    return _upsize_artwork(art_url) if art_url else None
+
+
+def get_now_playing(username: str, api_key: str) -> dict:
+    """Fetch the current/most recent scrobble from Last.fm."""
+    resp = requests.get(
+        "https://ws.audioscrobbler.com/2.0/",
+        params={"method": "user.getrecenttracks", "user": username, "api_key": api_key, "format": "json", "limit": 1},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    track = _first_track(data.get("recenttracks", {}).get("track"))
+    if track is None:
+        raise RuntimeError("No recent tracks found for this Last.fm user.")
+    images = track.get("image", [])
+    if isinstance(images, dict):
+        images = [images]
+    image_url = next((image.get("#text") for image in reversed(images) if image.get("#text")), None)
     return {
-        "track": track.get("name", "Unknown Track"),
-        "artist": track.get("artist", {}).get("#text", "Unknown Artist"),
-        "album": track.get("album", {}).get("#text", ""),
-        "now_playing": is_now_playing,
-        "lastfm_image_url": lastfm_image_url,
+        "track": _track_text(track.get("name")) or "Unknown Track",
+        "artist": _track_text(track.get("artist")) or "Unknown Artist",
+        "album": _track_text(track.get("album")),
+        "now_playing": track.get("@attr", {}).get("nowplaying") == "true",
+        "lastfm_image_url": image_url,
     }
-
-
-ARTWORK_SIZE_RE = re.compile(r"\d+x\d+bb")
 
 
 def _upsize_artwork(url: str, size: int = 632) -> str:

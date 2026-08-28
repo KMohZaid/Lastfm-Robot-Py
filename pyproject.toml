@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Telegram inline Last.fm card bot"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.11.0",
     "asyncpg>=0.31.0",
     "kurigram>=2.2.23",
     "pillow>=10.0.0",
