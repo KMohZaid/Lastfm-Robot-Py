@@ -21,7 +21,7 @@ class Config:
     storage_chat_id: int
     spotify_client_id: str | None = None
     spotify_client_secret: str | None = None
-    spotify_redirect_uri: str = "http://localhost:8080/spotify/callback"
+    spotify_redirect_uri: str = "https://spotify.kmohzaid.eu.org/"
     spotify_scopes: str = "user-read-currently-playing user-read-playback-state user-read-private"
     spotify_callback_host: str = "0.0.0.0"
     spotify_callback_port: int = 8080
@@ -47,7 +47,7 @@ class Config:
             spotify_client_id=os.getenv("SPOTIFY_CLIENT_ID") or None,
             spotify_client_secret=os.getenv("SPOTIFY_CLIENT_SECRET") or None,
             spotify_redirect_uri=os.getenv(
-                "SPOTIFY_REDIRECT_URI", "http://localhost:8080/spotify/callback"
+                "SPOTIFY_REDIRECT_URI", "https://spotify.kmohzaid.eu.org/"
             ),
             spotify_scopes=os.getenv(
                 "SPOTIFY_SCOPES",

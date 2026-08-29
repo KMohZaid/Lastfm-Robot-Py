@@ -2,7 +2,7 @@
 
 ## Changes
 
-- Added optional Spotify OAuth configuration and an embedded `aiohttp` callback server.
+- Added optional Spotify OAuth configuration and an embedded `aiohttp` callback server. The default redirect URI is `https://spotify.kmohzaid.eu.org/`, with the public root path routed to the callback server.
 - Added PostgreSQL persistence for Spotify access/refresh tokens, expiry, scope, profile ID, and display name.
 - Added `/spotify_login`, `/spotify`, `/login_spotify`, and `/auth` commands.
 - Added Spotify currently-playing support for tracks and podcast episodes. Artwork comes directly from Spotify; Spotify results produce one cached photo and one sticker from the same rendered image.
@@ -12,7 +12,7 @@
 
 ## Spotify API model and errors
 
-The implementation uses Authorization Code OAuth, stores the refresh token, and refreshes access tokens shortly before expiry. Spotify may omit a replacement refresh token, so the existing one is retained. OAuth state is random, bound to the Telegram user, single-use, and expires after ten minutes.
+OAuth state is random, bound to the Telegram user, single-use, and expires after ten minutes. After Spotify redirects to the public root with the authorization code, the code is held in process memory for ten minutes under a unique, single-use Telegram handoff code. The browser page links to `https://t.me/{bot_username}?start={handoff_code}`; `/start` verifies the original Telegram user before exchanging and persisting the Spotify token.
 
 `GET /v1/me/player/currently-playing` may return `204 No Content`, a missing/null `item`, or `is_playing: false`; these are treated as no current result. Track metadata uses `album.images`, artist names, external Spotify URLs, and the largest available image. Episode metadata uses `images` or the show's images and the show's name.
 
@@ -28,7 +28,7 @@ Reference documentation:
 
 A separate `spotify_tokens` table keeps provider credentials independent from the existing Last.fm username table and makes startup schema creation idempotent. OAuth state remains in process memory because it is short-lived and only coordinates a browser callback; deployments with multiple bot instances would need shared state.
 
-The callback server is embedded to avoid another service, but `SPOTIFY_REDIRECT_URI` must be a public HTTPS URL routed to the configured callback host and port in production. The default localhost URI is suitable only for local testing.
+The callback server is embedded to avoid another service. At startup the bot stores its own Telegram username in memory so callback pages can generate Telegram deep links. The public HTTPS domain must reverse-proxy its root path to the configured callback host and port, and the exact redirect URI must be registered in the Spotify Developer Dashboard.
 
 Last.fm remains optional for inline results when Spotify is connected, and Spotify remains optional when only Last.fm is configured. Spotify cards never call the iTunes artwork search. Last.fm artwork still uses iTunes with the Last.fm image as fallback.
 

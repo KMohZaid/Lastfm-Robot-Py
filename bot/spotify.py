@@ -34,7 +34,36 @@ class SpotifyNowPlaying:
 
 
 _pending_states: dict[str, tuple[int, float]] = {}
+_pending_handoffs: dict[str, tuple[int, str, float]] = {}
+_bot_username: str | None = None
 _STATE_TTL = 600
+
+
+def set_bot_username(username: str | None) -> None:
+    global _bot_username
+    _bot_username = username
+
+
+def consume_handoff(telegram_user_id: int, code: str) -> str | None:
+    handoff = _pending_handoffs.get(code)
+    if handoff is None or handoff[2] <= time.time() or handoff[0] != telegram_user_id:
+        return None
+    _pending_handoffs.pop(code, None)
+    return handoff[1]
+
+
+def create_handoff(telegram_user_id: int, spotify_code: str) -> str:
+    if not _bot_username:
+        raise RuntimeError("Telegram bot username is not initialized")
+    now = time.time()
+    _pending_handoffs.update(
+        {code: value for code, value in _pending_handoffs.items() if value[2] > now}
+    )
+    code = secrets.token_urlsafe(6)
+    while code in _pending_handoffs:
+        code = secrets.token_urlsafe(6)
+    _pending_handoffs[code] = (telegram_user_id, spotify_code, now + _STATE_TTL)
+    return f"https://t.me/{_bot_username}?start={urllib.parse.quote(code)}"
 
 
 def configured() -> bool:
@@ -141,16 +170,21 @@ async def callback_handler(request: web.Request) -> web.Response:
     if not code:
         return web.Response(status=400, text="Spotify did not return an authorization code.")
     try:
-        await exchange_code(pending[0], code)
+        handoff_url = create_handoff(pending[0], code)
     except Exception:
-        logger.exception("Spotify OAuth callback failed")
+        logger.exception("Spotify OAuth handoff creation failed")
         return web.Response(status=502, text="Spotify authorization failed. You can close this window.")
-    return web.Response(text="Spotify connected successfully. You can close this window.")
+    link = html.escape(handoff_url, quote=True)
+    return web.Response(
+        content_type="text/html",
+        text=f'<p>Spotify authorization received.</p><p><a href="{link}">Continue in Telegram</a></p>',
+    )
 
 
 async def start_callback_server() -> web.AppRunner:
     config = get_config()
     app = web.Application()
+    app.router.add_get("/", callback_handler)
     app.router.add_get("/spotify/callback", callback_handler)
     app.router.add_get("/callback", callback_handler)
     runner = web.AppRunner(app)

@@ -16,7 +16,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineQue
 from bot.client import client
 from bot.config import get_config
 from bot.database import get_db
-from bot.spotify import SpotifyNowPlaying, currently_playing
+from bot.spotify import SpotifyNowPlaying, consume_handoff, currently_playing, exchange_code
 from lastfm_card import download_image, get_now_playing, render_card, search_artwork_candidates
 
 CACHE_TIME_SECONDS = 15
@@ -24,6 +24,16 @@ CACHE_TIME_SECONDS = 15
 
 @client.on_message(filters.command("start"))
 async def start_handler(_, message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) == 2:
+        spotify_code = consume_handoff(message.from_user.id, parts[1].strip())
+        if spotify_code:
+            try:
+                await exchange_code(message.from_user.id, spotify_code)
+                await message.reply_text("Spotify connected successfully.")
+                return
+            except Exception:
+                pass
     await message.reply_text("Set Last.fm with <code>/set your_lastfm_username</code> or connect Spotify with <code>/spotify_login</code>.\n\nThen use this bot inline to share what you are listening to.")
 
 
