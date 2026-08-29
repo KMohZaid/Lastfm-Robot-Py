@@ -13,7 +13,6 @@ from pyrogram.types import BotCommand
 from bot.client import client
 from bot.config import get_config
 from bot.database import Database, set_db
-from bot.spotify import set_bot_username, start_callback_server
 
 logger = logging.getLogger(__name__)
 
@@ -46,28 +45,20 @@ async def main() -> None:
     set_db(database)
     logger.info("Database connected and initialized")
 
-    from bot.plugins import lastfm, spotify  # noqa: F401
+    from bot.plugins import lastfm  # noqa: F401
 
-    callback_runner = None
     try:
         logger.info("Registered %s handlers", _registered_handler_count())
         await client.start()
-        me = await client.get_me()
-        set_bot_username(me.username)
-        if config.spotify_client_id and config.spotify_client_secret:
-            callback_runner = await start_callback_server()
         await client.set_bot_commands(
             [
                 BotCommand("set", "Set your Last.fm username"),
-                BotCommand("spotify_login", "Connect Spotify"),
-                BotCommand("auth", "Show connected accounts"),
+                BotCommand("auth", "Show Last.fm account status"),
                 BotCommand("start", "Show setup help"),
             ]
         )
         await idle()
     finally:
-        if callback_runner is not None:
-            await callback_runner.cleanup()
         await client.stop()
         await database.close()
 

@@ -19,42 +19,18 @@ class Config:
     lastfm_api_key: str
     database_url: str
     storage_chat_id: int
-    spotify_client_id: str | None = None
-    spotify_client_secret: str | None = None
-    spotify_redirect_uri: str = "https://spotify.kmohzaid.eu.org/"
-    spotify_scopes: str = "user-read-currently-playing user-read-playback-state user-read-private"
-    spotify_callback_host: str = "0.0.0.0"
-    spotify_callback_port: int = 8080
-    # Show music and podcast candidates when both match the Last.fm scrobble.
     lastfm_show_both_even_when_found_one: bool = True
     log_level: str = "INFO"
 
     @classmethod
     def from_env(cls) -> "Config":
-        bot_token = _required("BOT_TOKEN")
-        api_id = int(_required("API_ID"))
-        api_hash = _required("API_HASH")
-        lastfm_api_key = _required("LASTFM_API_KEY")
-        database_url = _required("DATABASE_URL")
-        storage_chat_id = int(_required("STORAGE_CHAT_ID"))
         return cls(
-            bot_token=bot_token,
-            api_id=api_id,
-            api_hash=api_hash,
-            lastfm_api_key=lastfm_api_key,
-            database_url=database_url,
-            storage_chat_id=storage_chat_id,
-            spotify_client_id=os.getenv("SPOTIFY_CLIENT_ID") or None,
-            spotify_client_secret=os.getenv("SPOTIFY_CLIENT_SECRET") or None,
-            spotify_redirect_uri=os.getenv(
-                "SPOTIFY_REDIRECT_URI", "https://spotify.kmohzaid.eu.org/"
-            ),
-            spotify_scopes=os.getenv(
-                "SPOTIFY_SCOPES",
-                "user-read-currently-playing user-read-playback-state user-read-private",
-            ),
-            spotify_callback_host=os.getenv("SPOTIFY_CALLBACK_HOST", "0.0.0.0"),
-            spotify_callback_port=int(os.getenv("SPOTIFY_CALLBACK_PORT", "8080")),
+            bot_token=_required("BOT_TOKEN"),
+            api_id=int(_required("API_ID")),
+            api_hash=_required("API_HASH"),
+            lastfm_api_key=_required("LASTFM_API_KEY"),
+            database_url=_required("DATABASE_URL"),
+            storage_chat_id=int(_required("STORAGE_CHAT_ID")),
             lastfm_show_both_even_when_found_one=_as_bool(
                 os.getenv("LASTFM_SHOW_BOTH_EVEN_WHEN_FOUND_ONE", "True")
             ),
