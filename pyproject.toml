@@ -11,6 +11,7 @@ dependencies = [
     "requests>=2.32.0",
     "tgcrypto>=1.2.5",
     "uvloop>=0.21.0",
+    "youtube-search>=2.2.0",
 ]
 
 [tool.pytest.ini_options]

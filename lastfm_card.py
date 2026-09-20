@@ -13,6 +13,7 @@ Get a free Last.fm API key at: https://www.last.fm/api/account/create
 
 import argparse
 import io
+import logging
 import os
 import re
 import subprocess
@@ -22,6 +23,8 @@ import urllib.parse
 from pathlib import Path
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+
+logger = logging.getLogger(__name__)
 
 def _find_font(candidates: list[str]) -> str | None:
     """Return the first existing font path from a list of candidates."""
@@ -106,6 +109,7 @@ WHITE = (255, 255, 255)
 WHITE_DIM = (235, 245, 238)
 
 
+ARTWORK_SIZE_RE = re.compile(r"\d+x\d+(?=bb(?:\.jpg)?$)", re.IGNORECASE)
 EPISODE_RE = re.compile(r"\bep(?:isode)?[^\d]*(\d+)\b", re.IGNORECASE)
 
 
@@ -126,17 +130,48 @@ def extract_episode_number(text: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _itunes_search_results(term: str, entity: str, limit: int = 10) -> list[dict]:
+def itunes_search(
+    term: str, entity: str, limit: int = 10
+) -> tuple[requests.Response | None, list[dict]]:
+    url = "https://itunes.apple.com/search"
+    params = {"term": term, "entity": entity, "limit": limit}
+    logger.info("iTunes request: url=%s params=%s", url, params)
     try:
-        resp = requests.get(
-            "https://itunes.apple.com/search",
-            params={"term": term, "entity": entity, "limit": limit},
-            timeout=10,
-        )
+        resp = requests.get(url, params=params, timeout=10)
+    except requests.RequestException:
+        logger.exception("iTunes request failed: entity=%s term=%r", entity, term)
+        return None, []
+
+    logger.info(
+        "iTunes response: entity=%s status=%s reason=%s bytes=%s content_type=%s",
+        entity,
+        resp.status_code,
+        resp.reason,
+        len(resp.content),
+        resp.headers.get("Content-Type", ""),
+    )
+    try:
         resp.raise_for_status()
-        return resp.json().get("results", [])
-    except (requests.RequestException, ValueError):
-        return []
+    except requests.RequestException:
+        logger.exception("iTunes returned an error: entity=%s term=%r", entity, term)
+        return resp, []
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.exception("iTunes returned invalid JSON: entity=%s term=%r", entity, term)
+        return resp, []
+
+    results = data.get("results", [])
+    if not isinstance(results, list):
+        logger.warning("iTunes response has invalid results: entity=%s term=%r", entity, term)
+        return resp, []
+    logger.info("iTunes returned %s results: entity=%s term=%r", len(results), entity, term)
+    return resp, results
+
+
+def _itunes_search_results(term: str, entity: str, limit: int = 10) -> list[dict]:
+    _, results = itunes_search(term, entity, limit)
+    return results
 
 
 def search_artwork_candidates(
@@ -146,22 +181,36 @@ def search_artwork_candidates(
     number = extract_episode_number(" ".join((track, album)))
     candidates: list[tuple[str, str | None]] = []
     music_terms = [
+        track,
+        f"{track} {artist}",
         f"{album} {artist}" if album else f"{artist} {track}",
-        f"{artist} {track}",
-        f"{track} {album} {artist}" if album else f"{track} {artist}",
     ]
     for term in music_terms:
+        matching_results = []
         for result in _itunes_search_results(term, "song"):
             name = str(result.get("trackName", "")).casefold()
             result_artist = str(result.get("artistName", "")).casefold()
             if not name or track.casefold() not in name and name not in track.casefold():
                 continue
-            if artist and artist.casefold() not in result_artist and result_artist not in artist.casefold():
+            artist_matches = bool(
+                artist
+                and (
+                    artist.casefold() in result_artist
+                    or result_artist in artist.casefold()
+                )
+            )
+            if artist and not artist_matches:
                 continue
+            score = (
+                int(name == track.casefold()),
+                int(artist_matches),
+            )
+            matching_results.append((score, result))
+        for _, result in sorted(matching_results, key=lambda item: item[0], reverse=True):
             candidate = ("Music", _result_artwork(result) or lastfm_fallback)
             if candidate not in candidates:
                 candidates.append(candidate)
-        if candidates:
+        if any(kind == "Music" for kind, _ in candidates):
             break
 
     episode_terms = []
@@ -187,7 +236,17 @@ def search_artwork_candidates(
                 candidates.append(candidate)
         if any(kind == "Podcast" for kind, _ in candidates):
             break
-    return candidates
+
+    music_candidate = next(
+        (candidate for candidate in candidates if candidate[0] == "Music"), None
+    )
+    podcast_candidate = next(
+        (candidate for candidate in candidates if candidate[0] == "Podcast"), None
+    )
+    return [
+        music_candidate or ("Music", lastfm_fallback),
+        podcast_candidate or ("Podcast", lastfm_fallback),
+    ]
 
 
 def search_artwork(
@@ -199,8 +258,22 @@ def search_artwork(
 
 
 def _result_artwork(result: dict) -> str | None:
-    art_url = result.get("artworkUrl600") or result.get("artworkUrl100") or result.get("artworkUrl60") or result.get("artworkUrl30")
-    return _upsize_artwork(art_url) if art_url else None
+    art_url = (
+        result.get("artworkUrl600")
+        or result.get("artworkUrl100")
+        or result.get("artworkUrl60")
+        or result.get("artworkUrl30")
+    )
+    if not art_url:
+        logger.warning("iTunes result has no artwork fields: keys=%s", sorted(result))
+        return None
+    artwork_url = _upsize_artwork(art_url)
+    logger.info(
+        "iTunes artwork URL selected: source=%s resized=%s",
+        art_url,
+        artwork_url,
+    )
+    return artwork_url
 
 
 def get_now_playing(username: str, api_key: str) -> dict:
@@ -231,19 +304,12 @@ def get_now_playing(username: str, api_key: str) -> dict:
 def _upsize_artwork(url: str, size: int = 632) -> str:
     """iTunes artwork URLs end in e.g. '100x100bb.jpg' or '600x600bb.jpg' --
     swap that for a larger size regardless of which one we got."""
-    return ARTWORK_SIZE_RE.sub(f"{size}x{size}bb", url)
+    return ARTWORK_SIZE_RE.sub(f"{size}x{size}", url)
 
 
 def _itunes_search(term: str, entity: str) -> dict | None:
-    url = "https://itunes.apple.com/search"
-    params = {"term": term, "entity": entity, "limit": 1}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        return results[0] if results else None
-    except requests.RequestException:
-        return None
+    _, results = itunes_search(term, entity, limit=1)
+    return results[0] if results else None
 
 
 def get_artwork_url(artist: str, track: str, entity: str, lastfm_fallback: str | None) -> str | None:
@@ -252,7 +318,7 @@ def get_artwork_url(artist: str, track: str, entity: str, lastfm_fallback: str |
     falls back to Last.fm's own image URL for this track (which is
     sometimes a generic placeholder, but better than nothing).
     """
-    term = f"{artist} {track}"
+    term = f"{track} {artist}"
     result = _itunes_search(term, entity)
 
     if result is not None:
@@ -271,11 +337,22 @@ def get_artwork_url(artist: str, track: str, entity: str, lastfm_fallback: str |
 
 
 def download_image(url: str) -> Image.Image | None:
+    logger.info("Artwork download: url=%s", url)
     try:
         resp = requests.get(url, timeout=10)
+        logger.info(
+            "Artwork response: status=%s reason=%s bytes=%s content_type=%s",
+            resp.status_code,
+            resp.reason,
+            len(resp.content),
+            resp.headers.get("Content-Type", ""),
+        )
         resp.raise_for_status()
-        return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        image = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        logger.info("Artwork decoded: size=%s", image.size)
+        return image
     except Exception:
+        logger.exception("Artwork download or decode failed: url=%s", url)
         return None
 
 

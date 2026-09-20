@@ -45,7 +45,7 @@ async def main() -> None:
     set_db(database)
     logger.info("Database connected and initialized")
 
-    from bot.plugins import lastfm  # noqa: F401
+    from bot.plugins import lastfm
 
     try:
         logger.info("Registered %s handlers", _registered_handler_count())
@@ -57,6 +57,7 @@ async def main() -> None:
                 BotCommand("start", "Show setup help"),
             ]
         )
+        await lastfm._send_restart_done()
         await idle()
     finally:
         await client.stop()
