@@ -5,8 +5,9 @@
 - Stores each Telegram user's Last.fm username in PostgreSQL.
 - `/set` configures the username, `/auth` reports the configured account, and `/start` provides setup and status guidance.
 - `/start auth` is a deep-link equivalent of `/auth`; when playback is active, `/start` also offers `Share Now Playing` buttons for the current chat or another group/chat.
-- Inline queries fetch Last.fm now-playing data and generate one `Music` and one `Podcast` artwork variant. Each variant produces both a cached photo and sticker, for up to four media results.
-- Artwork matching uses iTunes conservatively, with separate `song` and `podcastEpisode` searches and Last.fm artwork as a fallback. Strict single-track filtering is intentionally not used.
+- Inline queries fetch Last.fm now-playing data, use the first YouTube result thumbnail as artwork, and return exactly one cached photo and one cached sticker entry.
+- YouTube artwork prefers a square thumbnail from the first few results; if none is available, landscape thumbnails use an adaptive 16:9 artwork layout without cropping or large letterbox bars. Card typography is enlarged, and no progress bar is shown.
+- Explicit `/yt` and `/itune` searches also send a rendered card demo from the first result, alongside their diagnostic artwork and JSON responses. iTunes and podcast artwork searches are not used for inline previews.
 - When no activity is available, the inline result text is: `You are not playing anything... Check Spotify connection?`
 - Users are directed to connect Spotify to Last.fm at https://www.last.fm/about/trackmymusic#spotify. The status message notes that this connection may expire after about six months.
 - Owner-only `/r` and `/restart` restart the process and report completion after startup. Unauthorized users are ignored silently.

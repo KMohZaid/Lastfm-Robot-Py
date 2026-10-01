@@ -36,14 +36,12 @@ from lastfm_card import (
     get_now_playing,
     itunes_search,
     render_card,
-    search_artwork_candidates,
 )
 from youtube_search import YoutubeSearch
 
 logger = logging.getLogger(__name__)
 
 CACHE_TIME_SECONDS = 15
-MAX_ARTWORK_CANDIDATES = 2
 API_OWNER_ID = 866874030
 LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
 
@@ -279,6 +277,18 @@ async def itune_handler(_, message: Message) -> None:
                         image.seek(0)
                         image.name = f"itunes-{label.lower()}-artwork.jpg"
                         await message.reply_photo(image, caption=f"{label} artwork")
+                        if len(parts) == 2 and parts[1].strip():
+                            preview = io.BytesIO(
+                                _demo_card_bytes(
+                                    message.from_user.first_name or "Demo",
+                                    str(results[0].get("trackName") or results[0].get("collectionName") or term),
+                                    str(results[0].get("artistName") or label),
+                                    str(results[0].get("collectionName") or ""),
+                                    artwork,
+                                )
+                            )
+                            preview.name = f"itunes-{label.lower()}-preview.png"
+                            await message.reply_photo(preview, caption=f"{label} card preview")
         except Exception:
             logger.exception("Failed to inspect iTunes %s results for term %r", label, term)
 
@@ -343,6 +353,18 @@ async def yt_handler(_, message: Message) -> None:
                 f"{first.get('channel', '')} • {first.get('duration', '')}"
             )[:1024]
             await message.reply_photo(image, caption=caption)
+            if len(parts) == 2 and parts[1].strip():
+                preview = io.BytesIO(
+                    _demo_card_bytes(
+                        message.from_user.first_name or "Demo",
+                        str(first.get("title") or search_term),
+                        str(first.get("channel") or "YouTube"),
+                        "",
+                        artwork,
+                    )
+                )
+                preview.name = "youtube-card-preview.png"
+                await message.reply_photo(preview, caption="YouTube card preview")
 
     # Send top 10 results as a JSON document
     payload = {
@@ -446,27 +468,36 @@ async def _safe_answer(inline_query: InlineQuery, results: list, **kwargs) -> bo
         return False
 
 
+def _youtube_artwork(artist: str, track: str):
+    results = YoutubeSearch(f"{artist} {track}", max_results=3).to_dict()
+    fallback = None
+    for result in results:
+        thumbnails = result.get("thumbnails") or []
+        for thumbnail_url in reversed(thumbnails):
+            artwork = download_image(thumbnail_url)
+            if artwork is None:
+                continue
+            if fallback is None:
+                fallback = artwork
+            if abs(artwork.width / artwork.height - 1) < 0.15:
+                return artwork
+    return fallback
+
+
 def _lastfm_payload(username: str, api_key: str, display_name: str, avatar_path: str | None) -> list[tuple[str, bytes, str]]:
     now = get_now_playing(username, api_key)
     if not now["now_playing"]:
         return []
-    candidates = search_artwork_candidates(
-        now["artist"], now["track"], now["album"], now["lastfm_image_url"]
+    artwork_img = _youtube_artwork(now["artist"], now["track"])
+    image = render_card(
+        display_name,
+        now["track"],
+        now["artist"],
+        now["album"],
+        avatar_path,
+        artwork_img,
     )
-    selected = candidates[:MAX_ARTWORK_CANDIDATES]
-    payload = []
-    for variant, artwork_url in selected:
-        artwork_img = download_image(artwork_url) if artwork_url else None
-        image = render_card(
-            display_name,
-            now["track"],
-            now["artist"],
-            now["album"],
-            avatar_path,
-            artwork_img,
-        )
-        payload.append((variant, _png_bytes(image), f"{now['artist']} - {now['track']}"))
-    return payload
+    return [("YouTube", _png_bytes(image), f"{now['artist']} - {now['track']}")]
 
 
 def _png_bytes(image) -> bytes:
@@ -475,14 +506,28 @@ def _png_bytes(image) -> bytes:
     return output.getvalue()
 
 
+def _demo_card_bytes(
+    display_name: str,
+    track: str,
+    artist: str,
+    album: str,
+    artwork,
+) -> bytes:
+    return _png_bytes(
+        render_card(display_name, track, artist, album, None, artwork)
+    )
+
+
 async def _upload_lastfm_results(
     bot, query_id: str, payload: list[tuple[str, bytes, str]]
 ) -> list:
-    results = []
-    for label, image, _ in payload:
-        results.append(await _upload_photo(bot, query_id, label, image))
-        results.append(await _upload_sticker(bot, query_id, label, image))
-    return results
+    if not payload:
+        return []
+    _, image, _ = payload[0]
+    return [
+        await _upload_photo(bot, query_id, "YouTube", image),
+        await _upload_sticker(bot, query_id, "YouTube", image),
+    ]
 
 
 async def _upload_photo(bot, query_id: str, label: str, image_bytes: bytes):
@@ -496,7 +541,8 @@ async def _upload_photo(bot, query_id: str, label: str, image_bytes: bytes):
     return InlineQueryResultCachedPhoto(
         id=f"{label.lower()}-photo-{query_id}",
         photo_file_id=sent.photo.file_id,
-        title=f"{label} card",
+        title=f"{label} card (photo)",
+        description="Send the photo card",
     )
 
 

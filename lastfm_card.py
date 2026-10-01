@@ -427,6 +427,11 @@ def build_avatar(avatar_path: str | None, display_name: str, size: int) -> Image
     return out
 
 
+def _fit_artwork(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """Fit artwork to a rectangular box without cropping or distortion."""
+    return ImageOps.contain(image.convert("RGB"), size, Image.LANCZOS)
+
+
 def render_card(display_name: str, track: str, artist: str, album: str,
                  avatar_path: str | None, artwork_img: Image.Image | None) -> Image.Image:
     card = Image.new("RGB", (CARD_W, CARD_H), GREEN_BOTTOM)
@@ -461,26 +466,37 @@ def render_card(display_name: str, track: str, artist: str, album: str,
     )
 
     # --- Bottom info band ---
-    art_x, art_y = PAD, TOP_H + (CARD_H - TOP_H - ART_SIZE) // 2
-    if artwork_img is not None:
-        art = ImageOps.fit(artwork_img, (ART_SIZE, ART_SIZE), Image.LANCZOS)
+    landscape = artwork_img is not None and artwork_img.width / artwork_img.height > 1.25
+    if landscape:
+        art_w, art_h = 190, 107
+        art_x = PAD
+        art_y = TOP_H + 16
+        info_x = art_x + art_w + 20
+        info_w = CARD_W - info_x - PAD
     else:
-        art = Image.new("RGB", (ART_SIZE, ART_SIZE), (60, 60, 60))
-    mask = rounded_mask((ART_SIZE, ART_SIZE), 9)
+        art_w = art_h = ART_SIZE
+        art_x = PAD
+        art_y = TOP_H + (CARD_H - TOP_H - art_h) // 2
+        info_x = art_x + art_w + 20
+        info_w = CARD_W - info_x - PAD
+
+    if artwork_img is not None:
+        art = _fit_artwork(artwork_img, (art_w, art_h))
+        art_canvas = Image.new("RGB", (art_w, art_h), GREEN_BOTTOM)
+        art_canvas.paste(art, ((art_w - art.width) // 2, (art_h - art.height) // 2))
+        art = art_canvas
+    else:
+        art = Image.new("RGB", (art_w, art_h), (60, 60, 60))
+    mask = rounded_mask((art_w, art_h), 9)
     card.paste(art, (art_x, art_y), mask)
 
-    info_x = art_x + ART_SIZE + 20
-    info_w = CARD_W - info_x - PAD
-
-    track_font = fit_font(draw, track, FONT_BOLD, info_w, 26, 14)
-    artist_font = ImageFont.truetype(FONT_REGULAR, 21)
-    album_font = ImageFont.truetype(FONT_REGULAR, 15)
+    track_font = fit_font(draw, track, FONT_BOLD, info_w, 31, 16)
+    artist_font = ImageFont.truetype(FONT_REGULAR, 25)
+    album_font = ImageFont.truetype(FONT_REGULAR, 19)
 
     track_lines = wrap_to_width(draw, track, track_font, info_w)
-    artist_text = f"by {artist}"
-    artist_lines = wrap_to_width(draw, artist_text, artist_font, info_w)
-    album_text = f"on {album}" if album else ""
-    album_lines = wrap_to_width(draw, album_text, album_font, info_w) if album_text else []
+    artist_lines = wrap_to_width(draw, f"by {artist}", artist_font, info_w)
+    album_lines = wrap_to_width(draw, f"on {album}", album_font, info_w) if album else []
 
     cy = art_y + 5
     for line in track_lines:
